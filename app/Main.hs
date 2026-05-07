@@ -1,7 +1,4 @@
-
-module Main where
-
-import qualified Template
+module Main (main) where
 
 main :: IO ()
-main = Template.main
+main = putStrLn "rad-investigation: yesod admin subsite library"

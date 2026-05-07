@@ -21,7 +21,7 @@ source-repository head
   location: https://github.com/jappeace/template
 
 common common-options
-  default-extensions: 
+  default-extensions:
       EmptyCase
       FlexibleContexts
       FlexibleInstances
@@ -51,7 +51,6 @@ common common-options
     -fdefer-diagnostics -Wunused-packages
     -fenable-th-splice-warnings
     -fno-omit-yields
-    -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
 
   build-depends:
       base >=4.9.1.0 && <4.22.0
@@ -61,11 +60,25 @@ common common-options
 library
   import: common-options
   exposed-modules:
-      Template
+      Yesod.Admin
+      Yesod.Admin.Class
+      Yesod.Admin.Config
+      Yesod.Admin.Views
+      Yesod.Admin.TH
   other-modules:
       Paths_template
   hs-source-dirs:
       src
+  build-depends:
+      persistent
+    , yesod-core
+    , yesod-form
+    , yesod-persistent
+    , template-haskell
+    , text
+    , containers
+    , blaze-html
+    , path-pieces
 
 executable exe
   import: common-options
@@ -74,19 +87,29 @@ executable exe
       app
   build-depends:
       template
-  ghc-options: -Wno-unused-packages
+  ghc-options: -Wno-unused-packages -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
 
 test-suite unit
   import: common-options
   type: exitcode-stdio-1.0
   main-is: Test.hs
-  ghc-options: -Wno-unused-packages
+  ghc-options: -Wno-unused-packages -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
   other-modules:
       Paths_template
+      TestModel
+      TestAdmin
   hs-source-dirs:
       test
   build-depends:
-      tasty,
-      tasty-hunit,
-      tasty-quickcheck,
-      template
+      hspec
+    , template
+    , persistent
+    , persistent-sqlite
+    , yesod-core
+    , yesod-form
+    , yesod-persistent
+    , yesod-test
+    , text
+    , monad-logger
+    , resource-pool
+    , resourcet
