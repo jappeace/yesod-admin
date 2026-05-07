@@ -9,3 +9,4 @@ TAGS
 *.hi
 *.o
 .envrc
+client_session_key.aes

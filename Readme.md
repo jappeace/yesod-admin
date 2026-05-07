@@ -1,89 +1,117 @@
-[![https://jappieklooster.nl](https://img.shields.io/badge/blog-jappieklooster.nl-lightgrey)](https://jappieklooster.nl/tag/haskell.html)
-[![Github actions build status](https://img.shields.io/github/actions/workflow/status/jappeace/haskell-template-project/nix.yaml?branch=master)](https://github.com/jappeace/haskell-template-project/actions)
-[![Jappiejappie](https://img.shields.io/badge/discord-jappiejappie-black?logo=discord)](https://discord.gg/Hp4agqy)
-[![Hackage version](https://img.shields.io/hackage/v/template.svg?label=Hackage)](https://hackage.haskell.org/package/template) 
+# yesod-admin
 
-> The eye that looks ahead to the safe course is closed forever.
-
-Haskell project template.
-
-Set up cabal within a nix shell.
-If you like nix this is a good way of doing haskell development.
-
-similar to: https://github.com/monadfix/nix-cabal
-except this has a makefile and ghcid.
-We also make aggressive use of [pinning](https://wiki.nixos.org/wiki/FAQ/Pinning_Nixpkgs)
-ensuring project builds for ever (theoretically).
-
-Comes with:
-+ [GHCID](https://jappieklooster.nl/ghcid-for-multi-package-projects.html)
-+ a nix shell, meaning somewhat platform independence.
-  + which is pinned by default
-+ A couple of handy make commands.
-+ Starting haskell files, assuming we put practically all code in library
-+ Working test suite.
-+ functioining CI (pick your favorite or keep both)
-  + for various platforms with cabal
+Auto-generate per-entity CRUD admin pages from
+[Persistent](https://hackage.haskell.org/package/persistent) models using
+Template Haskell.
 
 ## Usage
 
-### Modifying for your project
-Assuming the name of your new project is `new-project`.
+### 1. Define models (Model.hs)
 
-```
-git clone git@github.com:jappeace/haskell-template-project.git new-project
-cd new-project
-```
+`mkAdmin` plugs into `share` alongside `mkPersist` / `mkMigrate`.
+It generates a subsite per entity (e.g. `UserAdmin`, `BlogPostAdmin`)
+with list, create, edit, and delete routes.
 
-+ [ ] Edit template.cabal,
-    + [ ] find and replace template with `new-project`
-    + [ ] Update copyright
-    + [ ] Update github
-+ [ ] rename template.cabal to new-project.cabal
-+ [ ] Edit Changelog.md
-  + [ ] replace template with `new-project`
-  + [ ] Also describe your version 1.0.0 release.
-+ [x] Edit default.nix and shell.nix, replace template with `new-project`.
-+ [ ] Edit copyright in LICENSE
-+ [ ] For automatic bound bumping: In “Settings” → “Actions” → “General” → “Workflow permissions” tick “Allow GitHub Actions to create and approve pull requests”
+```haskell
+-- Model.hs  (separate module required for TH staging)
+{-# LANGUAGE GADTs, QuasiQuotes, TemplateHaskell, TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances, DataKinds, DerivingStrategies #-}
+{-# LANGUAGE StandaloneDeriving, ViewPatterns, TypeOperators #-}
 
-#### Reconfigure remotes
-```
-git remote add template git@github.com:jappeace/haskell-template-project.git
-git remote set-url origin git@github.com:YOUR-ORG-OR-USER-NAME/new-project.git
-```
+module Model where
 
-We can get template updates like this if we want to by doing `git pull template`.
-There will be a large amount of conflicts, but the merge commit should solve them permanently.
+import Data.Text (Text)
+import Database.Persist.TH (share, mkPersist, mkMigrate, sqlSettings, persistLowerCase)
+import Yesod.Admin.TH (mkAdmin)
 
-#### Readme
+share
+  [ mkPersist sqlSettings
+  , mkMigrate "migrateAll"
+  , mkAdmin
+  ] [persistLowerCase|
+User
+    name Text
+    email Text
+    age Int Maybe
+    deriving Show Eq
 
-+ [ ] Select desired badges. 
-  + [ ] Point build badges to right project
-+ [ ] Give short project description.
-+ [ ] Add new quote suited for the project.
-  For example for [fakedata-quickcheck](https://github.com/fakedata-haskell/fakedata-quickcheck#readme)
-  I used Kant because
-  he dealt with the question "what is truth" a lot.
-+ [ ] Truncate this checklist
-+ [ ] Truncate motivation for using  this template
-
-### Tools
-Enter the nix shell.
-```
-nix-shell
-```
-You can checkout the makefile to see what's available:
-```
-cat makefile
+BlogPost
+    title Text
+    body Text
+    authorId UserId
+    deriving Show Eq
+|]
 ```
 
-### Running
-```
-make run
+### 2. Mount subsites (Main.hs)
+
+Import the generated subsite types and mount them in your Yesod routes:
+
+```haskell
+{-# LANGUAGE QuasiQuotes, TemplateHaskell, TypeFamilies #-}
+{-# LANGUAGE ViewPatterns, TypeOperators #-}
+
+module Main where
+
+import Yesod.Core
+import Yesod.Form (FormMessage, defaultFormMessage)
+import Yesod.Persist (YesodPersist(..))
+import Yesod.Admin (YesodAdmin(..))
+import Model (migrateAll, UserAdmin(..), BlogPostAdmin(..), getUserAdmin, getBlogPostAdmin)
+
+data App = App { appConnPool :: Pool SqlBackend }
+
+mkYesod "App" [parseRoutes|
+/admin/users  UserAdminR     UserAdmin     getUserAdmin
+/admin/posts  PostAdminR     BlogPostAdmin getBlogPostAdmin
+|]
+
+instance Yesod App
+instance YesodPersist App where
+  type YesodPersistBackend App = SqlBackend
+  runDB action = do
+    pool <- appConnPool <$> getYesod
+    runSqlPool action pool
+
+instance RenderMessage App FormMessage where
+  renderMessage _ _ = defaultFormMessage
+
+instance YesodAdmin App
 ```
 
-### Fast filewatch which runs tests
+Each entity gets four routes:
+
+| Route             | Method   | Description            |
+|-------------------|----------|------------------------|
+| `UserListR`       | GET      | List all records       |
+| `UserCreateR`     | GET/POST | Create form + handler  |
+| `UserEditR eid`   | GET/POST | Edit form + handler    |
+| `UserDeleteR eid` | POST     | Delete handler         |
+
+### Generated types per entity
+
+For an entity `User`, `mkAdmin` generates:
+
+- `data UserAdmin = UserAdmin` -- subsite type
+- `getUserAdmin :: a -> UserAdmin` -- subsite getter
+- `Route UserAdmin` data family with `UserListR`, `UserCreateR`, `UserEditR Int64`, `UserDeleteR Int64`
+- CRUD handlers and form definitions
+- `YesodSubDispatch UserAdmin master` instance
+
+## Running the example
+
+A working example lives in `example/`:
+
 ```
-make ghcid
+nix-shell --run "cabal run example"
+```
+
+Then visit <http://localhost:3000>.
+
+## Building
+
+```
+nix-shell --run "cabal build"
+nix-shell --run "cabal test"
+nix-build nix/ci.nix -A all-builds
 ```

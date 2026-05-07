@@ -89,6 +89,26 @@ executable exe
       template
   ghc-options: -Wno-unused-packages -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
 
+executable example
+  import: common-options
+  main-is: Main.hs
+  other-modules:
+      Model
+  hs-source-dirs:
+      example
+  build-depends:
+      template
+    , persistent
+    , persistent-sqlite
+    , yesod-core
+    , yesod-form
+    , yesod-persistent
+    , text
+    , monad-logger
+    , resource-pool
+    , warp
+  ghc-options: -Wno-unused-packages -Wno-missing-signatures -Wno-orphans -Wno-unused-top-binds -threaded
+
 test-suite unit
   import: common-options
   type: exitcode-stdio-1.0
