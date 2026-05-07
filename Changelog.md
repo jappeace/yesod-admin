@@ -1,6 +1,8 @@
-# Change log for template project
+# Change log for yesod-admin
 
-## Version 0.0.0 
+## Version 1.0.0
 
-import [template](https://github.com/jappeace/template).
-
+- `mkAdmin`: TH splice that generates per-entity CRUD admin subsites from Persistent models
+- List, create, edit, delete pages with auto-generated forms
+- `YesodAdmin` typeclass for authorization hooks
+- `AdminConfig` / `AdminEntityConfig` for per-entity customisation

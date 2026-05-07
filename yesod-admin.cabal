@@ -1,9 +1,9 @@
 cabal-version:      3.0
 
-name:           template
+name:           yesod-admin
 version:        1.0.0
-homepage:       https://github.com/jappeace/template#readme
-bug-reports:    https://github.com/jappeace/template/issues
+homepage:       https://github.com/jappeace/rad-investigation#readme
+bug-reports:    https://github.com/jappeace/rad-investigation/issues
 author:         Jappie Klooster
 maintainer:     hi@jappie.me
 copyright:      2025 Jappie Klooster
@@ -18,7 +18,7 @@ extra-doc-files:
 
 source-repository head
   type: git
-  location: https://github.com/jappeace/template
+  location: https://github.com/jappeace/rad-investigation
 
 common common-options
   default-extensions:
@@ -66,7 +66,7 @@ library
       Yesod.Admin.Views
       Yesod.Admin.TH
   other-modules:
-      Paths_template
+      Paths_yesod_admin
   hs-source-dirs:
       src
   build-depends:
@@ -86,8 +86,28 @@ executable exe
   hs-source-dirs:
       app
   build-depends:
-      template
+      yesod-admin
   ghc-options: -Wno-unused-packages -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
+
+executable example
+  import: common-options
+  main-is: Main.hs
+  other-modules:
+      Model
+  hs-source-dirs:
+      example
+  build-depends:
+      yesod-admin
+    , persistent
+    , persistent-sqlite
+    , yesod-core
+    , yesod-form
+    , yesod-persistent
+    , text
+    , monad-logger
+    , resource-pool
+    , warp
+  ghc-options: -Wno-unused-packages -Wno-missing-signatures -Wno-orphans -Wno-unused-top-binds -threaded
 
 test-suite unit
   import: common-options
@@ -95,14 +115,14 @@ test-suite unit
   main-is: Test.hs
   ghc-options: -Wno-unused-packages -threaded -rtsopts "-with-rtsopts=-N -M7G -T -Iw10"
   other-modules:
-      Paths_template
+      Paths_yesod_admin
       TestModel
       TestAdmin
   hs-source-dirs:
       test
   build-depends:
       hspec
-    , template
+    , yesod-admin
     , persistent
     , persistent-sqlite
     , yesod-core
