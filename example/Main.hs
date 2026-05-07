@@ -5,7 +5,6 @@
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
 
--- | Minimal Yesod app demonstrating yesod-admin subsites.
 module Main (main) where
 
 import Control.Monad.Logger (runStderrLoggingT)
@@ -24,12 +23,10 @@ import Model
   , Route(UserListR, BlogPostListR)
   )
 
--- | Application foundation type.
 data App = App
   { appConnPool :: Pool SqlBackend
   }
 
--- Mount the per-entity admin subsites.
 mkYesod "App" [parseRoutes|
 / HomeR GET
 /admin/users    UserAdminR     UserAdmin     getUserAdmin

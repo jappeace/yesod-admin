@@ -10,8 +10,6 @@
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
 
--- | Persistent entity definitions with auto-generated admin subsites.
---   Separate module required for Template Haskell staging.
 module Model where
 
 import Data.Text (Text)

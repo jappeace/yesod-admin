@@ -12,11 +12,20 @@ Template Haskell.
 It generates a subsite per entity (e.g. `UserAdmin`, `BlogPostAdmin`)
 with list, create, edit, and delete routes.
 
+A separate module is required for Template Haskell staging.
+
 ```haskell
--- Model.hs  (separate module required for TH staging)
-{-# LANGUAGE GADTs, QuasiQuotes, TemplateHaskell, TypeFamilies #-}
-{-# LANGUAGE UndecidableInstances, DataKinds, DerivingStrategies #-}
-{-# LANGUAGE StandaloneDeriving, ViewPatterns, TypeOperators #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
 
 module Model where
 
@@ -48,25 +57,43 @@ BlogPost
 Import the generated subsite types and mount them in your Yesod routes:
 
 ```haskell
-{-# LANGUAGE QuasiQuotes, TemplateHaskell, TypeFamilies #-}
-{-# LANGUAGE ViewPatterns, TypeOperators #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeOperators #-}
+{-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
 
-module Main where
+module Main (main) where
 
+import Control.Monad.Logger (runStderrLoggingT)
+import Data.Pool (Pool)
+import Database.Persist.Sql (SqlBackend, runSqlPool, runMigration)
+import Database.Persist.Sqlite (createSqlitePool)
+import Network.Wai.Handler.Warp (run)
 import Yesod.Core
 import Yesod.Form (FormMessage, defaultFormMessage)
 import Yesod.Persist (YesodPersist(..))
 import Yesod.Admin (YesodAdmin(..))
-import Model (migrateAll, UserAdmin(..), BlogPostAdmin(..), getUserAdmin, getBlogPostAdmin)
+import Model
+  ( migrateAll
+  , UserAdmin(..), BlogPostAdmin(..)
+  , getUserAdmin, getBlogPostAdmin
+  , Route(UserListR, BlogPostListR)
+  )
 
-data App = App { appConnPool :: Pool SqlBackend }
+data App = App
+  { appConnPool :: Pool SqlBackend
+  }
 
 mkYesod "App" [parseRoutes|
-/admin/users  UserAdminR     UserAdmin     getUserAdmin
-/admin/posts  PostAdminR     BlogPostAdmin getBlogPostAdmin
+/ HomeR GET
+/admin/users    UserAdminR     UserAdmin     getUserAdmin
+/admin/posts    PostAdminR     BlogPostAdmin getBlogPostAdmin
 |]
 
 instance Yesod App
+
 instance YesodPersist App where
   type YesodPersistBackend App = SqlBackend
   runDB action = do
@@ -77,6 +104,23 @@ instance RenderMessage App FormMessage where
   renderMessage _ _ = defaultFormMessage
 
 instance YesodAdmin App
+
+getHomeR :: HandlerFor App Html
+getHomeR = defaultLayout [whamlet|
+  <h1>Example App
+  <ul>
+    <li><a href=@{UserAdminR UserListR}>Manage Users
+    <li><a href=@{PostAdminR BlogPostListR}>Manage Blog Posts
+  |]
+
+main :: IO ()
+main = do
+  pool <- runStderrLoggingT $ createSqlitePool "example.db" 5
+  runSqlPool (runMigration migrateAll) pool
+  let app = App pool
+  waiApp <- toWaiApp app
+  putStrLn "Running on http://localhost:3000"
+  run 3000 waiApp
 ```
 
 Each entity gets four routes:

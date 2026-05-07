@@ -4,6 +4,7 @@
 let
   buildTargets = {
     library = hpkgs.yesod-admin;
+    readme-example = import ./test-readme-example.nix { inherit pkgs hpkgs; };
   };
 in
 buildTargets // {
