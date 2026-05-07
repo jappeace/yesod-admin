@@ -101,8 +101,7 @@ test-suite unit
   hs-source-dirs:
       test
   build-depends:
-      tasty
-    , tasty-hunit
+      hspec
     , template
     , persistent
     , persistent-sqlite
