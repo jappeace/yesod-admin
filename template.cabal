@@ -61,7 +61,6 @@ library
   import: common-options
   exposed-modules:
       Yesod.Admin
-      Yesod.Admin.Foundation
       Yesod.Admin.Class
       Yesod.Admin.Config
       Yesod.Admin.Views
@@ -79,6 +78,7 @@ library
     , text
     , containers
     , blaze-html
+    , path-pieces
 
 executable exe
   import: common-options

@@ -1,4 +1,5 @@
--- | Yesod admin subsite: auto-generates CRUD pages from Persistent models.
+-- | Yesod admin subsite: auto-generates per-entity CRUD pages from
+--   Persistent models.
 --
 -- @
 -- share
@@ -11,13 +12,16 @@
 --     email Text
 -- |]
 -- @
+--
+-- This generates @UserAdmin@ subsite (with @getUserAdmin@) that you
+-- mount in your parent site's routes:
+--
+-- @
+-- /admin/user UserAdminR UserAdmin getUserAdmin
+-- @
 module Yesod.Admin
-  ( -- * Subsite foundation
-    Admin(..)
-  , getAdmin
-  , Route(..)
-    -- * Typeclass
-  , YesodAdmin(..)
+  ( -- * Typeclass
+    YesodAdmin(..)
     -- * Configuration
   , AdminConfig(..)
   , AdminEntityConfig(..)
@@ -27,13 +31,10 @@ module Yesod.Admin
   , mkAdmin
   , mkAdminWith
     -- * Views (for custom overrides)
-  , adminDashboardWidget
   , adminListWidget
   , adminFormWidget
-  , adminDeleteConfirmWidget
   ) where
 
-import Yesod.Admin.Foundation (Admin(..), getAdmin, Route(..))
 import Yesod.Admin.Class (YesodAdmin(..))
 import Yesod.Admin.Config
   ( AdminConfig(..)
@@ -42,9 +43,7 @@ import Yesod.Admin.Config
   , defaultAdminEntityConfig
   )
 import Yesod.Admin.Views
-  ( adminDashboardWidget
-  , adminListWidget
+  ( adminListWidget
   , adminFormWidget
-  , adminDeleteConfirmWidget
   )
 import Yesod.Admin.TH (mkAdmin, mkAdminWith)

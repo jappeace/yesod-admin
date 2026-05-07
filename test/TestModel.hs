@@ -16,7 +16,6 @@ module TestModel where
 import Data.Text (Text)
 import Database.Persist.TH (share, mkPersist, mkMigrate, sqlSettings, persistLowerCase)
 import Yesod.Admin.TH (mkAdmin)
-import Yesod.Admin.Foundation (Route(..))
 
 share
   [ mkPersist sqlSettings

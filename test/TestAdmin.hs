@@ -5,8 +5,7 @@
 {-# LANGUAGE TypeOperators #-}
 {-# OPTIONS_GHC -Wno-missing-signatures -Wno-orphans #-}
 
--- | Test application that verifies the admin subsite compiles and
---   integrates with a Yesod parent site.
+-- | Test application that mounts per-entity admin subsites.
 module TestAdmin where
 
 import Control.Monad.Logger (runNoLoggingT)
@@ -16,16 +15,17 @@ import Database.Persist.Sqlite (createSqlitePool)
 import Yesod.Core
 import Yesod.Form (FormMessage, defaultFormMessage)
 import Yesod.Persist (YesodPersist(..))
-import Yesod.Admin (Admin(..), getAdmin, YesodAdmin(..))
-import TestModel (migrateAll)
+import Yesod.Admin (YesodAdmin(..))
+import TestModel (migrateAll, UserAdmin(..), PostAdmin(..), getUserAdmin, getPostAdmin)
 
--- | Parent site with admin subsite
+-- | Parent site with per-entity admin subsites
 data App = App
   { appConnPool :: Pool SqlBackend
   }
 
 mkYesod "App" [parseRoutes|
-/admin AdminR Admin getAdmin
+/admin/user UserAdminR UserAdmin getUserAdmin
+/admin/post PostAdminR PostAdmin getPostAdmin
 |]
 
 instance Yesod App

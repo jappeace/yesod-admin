@@ -8,10 +8,11 @@ import Data.Text qualified as T
 import Database.Persist (Entity(..), selectList, insert)
 import Database.Persist.Sql (fromSqlKey, runSqlPool)
 import Test.Hspec (hspec)
-import TestAdmin (App(..), Route(AdminR), makeTestApp)
-import TestModel (User(..), Post(..))
-import Yesod.Admin.Foundation
-  ( Route(AdminEntityListR, AdminEntityCreateR, AdminEntityEditR, AdminEntityDeleteR)
+import TestAdmin (App(..), Route(UserAdminR, PostAdminR), makeTestApp)
+import TestModel
+  ( User(..), Post(..)
+  , Route(UserListR, UserCreateR, UserEditR, UserDeleteR)
+  , Route(PostCreateR)
   )
 import Yesod.Test
   ( yesodSpec, yit, ydescribe
@@ -27,12 +28,12 @@ main = do
 
     ydescribe "Create User" $ do
       yit "creates a user with all fields" $ do
-        get (AdminR (AdminEntityCreateR "User"))
+        get (UserAdminR UserCreateR)
         statusIs 200
 
         request $ do
           setMethod "POST"
-          setUrl (AdminR (AdminEntityCreateR "User"))
+          setUrl (UserAdminR UserCreateR)
           addToken
           byLabelExact "name" "alice"
           byLabelExact "email" "alice@example.com"
@@ -50,12 +51,12 @@ main = do
 
     ydescribe "Create User with nullable field omitted" $ do
       yit "creates a user without age" $ do
-        get (AdminR (AdminEntityCreateR "User"))
+        get (UserAdminR UserCreateR)
         statusIs 200
 
         request $ do
           setMethod "POST"
-          setUrl (AdminR (AdminEntityCreateR "User"))
+          setUrl (UserAdminR UserCreateR)
           addToken
           byLabelExact "name" "bob"
           byLabelExact "email" "bob@example.com"
@@ -75,12 +76,12 @@ main = do
         userId <- liftIO $ runSqlPool (insert (User "author" "author@example.com" Nothing)) (appConnPool testApp)
         let userIdText = T.pack (show (fromSqlKey userId :: Int64))
 
-        get (AdminR (AdminEntityCreateR "Post"))
+        get (PostAdminR PostCreateR)
         statusIs 200
 
         request $ do
           setMethod "POST"
-          setUrl (AdminR (AdminEntityCreateR "Post"))
+          setUrl (PostAdminR PostCreateR)
           addToken
           byLabelExact "title" "My Post"
           byLabelExact "body" "Post content"
@@ -101,12 +102,12 @@ main = do
         userId <- liftIO $ runSqlPool (insert (User "charlie" "charlie@example.com" (Just 25))) (appConnPool testApp)
         let userIdInt = fromSqlKey userId
 
-        get (AdminR (AdminEntityEditR "User" userIdInt))
+        get (UserAdminR (UserEditR userIdInt))
         statusIs 200
 
         request $ do
           setMethod "POST"
-          setUrl (AdminR (AdminEntityEditR "User" userIdInt))
+          setUrl (UserAdminR (UserEditR userIdInt))
           addToken
           byLabelExact "name" "charlie-updated"
           byLabelExact "email" "charlie-new@example.com"
@@ -130,7 +131,7 @@ main = do
 
         request $ do
           setMethod "POST"
-          setUrl (AdminR (AdminEntityDeleteR "User" userIdInt))
+          setUrl (UserAdminR (UserDeleteR userIdInt))
         statusIs 303
 
         users <- liftIO $ runSqlPool (selectList [] []) (appConnPool testApp)
@@ -142,7 +143,7 @@ main = do
         testApp <- getTestYesod
         _ <- liftIO $ runSqlPool (insert (User "visible-user" "visible@example.com" (Just 99))) (appConnPool testApp)
 
-        get (AdminR (AdminEntityListR "User"))
+        get (UserAdminR UserListR)
         statusIs 200
         bodyContains "visible-user"
         bodyContains "visible@example.com"

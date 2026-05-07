@@ -1,8 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | Template Haskell engine for generating an admin subsite from
---   Persistent 'UnboundEntityDef's.
+-- | Template Haskell engine for generating per-entity admin subsites
+--   from Persistent 'UnboundEntityDef's.
 module Yesod.Admin.TH
   ( mkAdmin
   , mkAdminWith
@@ -31,19 +31,16 @@ import Database.Persist.Sql (toSqlKey, fromSqlKey)
 import Database.Persist.Types (FieldType(..), FieldAttr(FieldAttrMaybe))
 import Language.Haskell.TH
 import Text.Blaze.Html (Html)
+import Web.PathPieces (PathPiece(..))
 import Yesod.Admin.Class (YesodAdmin)
 import Yesod.Admin.Config (AdminConfig(..), AdminEntityConfig(..))
-import Yesod.Admin.Foundation
-  ( Admin(..)
-  , Route(AdminDashboardR, AdminEntityListR, AdminEntityCreateR, AdminEntityEditR, AdminEntityDeleteR)
-  , resourcesAdmin
-  )
-import Yesod.Admin.Views (adminDashboardWidget, adminListWidget, adminFormWidget)
+import Yesod.Admin.Views (adminListWidget, adminFormWidget)
 import Yesod.Core
-  ( defaultLayout, redirect, notFound
+  ( defaultLayout, redirect
   , getRouteToParent, liftHandler
   , YesodSubDispatch(..), mkYesodSubDispatch
   , SubHandlerFor
+  , Route, RenderRoute(..), ParseRoute(..)
   )
 import Yesod.Form
   ( areq, aopt, textField, intField, doubleField, checkBoxField
@@ -52,36 +49,200 @@ import Yesod.Form
   , FormResult(..)
   )
 import Yesod.Persist (runDB, get404)
+import Yesod.Routes.TH.Types
+  ( ResourceTree(..), Resource(..), Piece(..), Dispatch(..)
+  )
 
--- | Generate a complete admin subsite from Persistent entity definitions.
+-- | Generate per-entity admin subsites from Persistent entity definitions.
 --   Intended for use with 'share':
 --
 -- @
 -- share [mkPersist sqlSettings, mkMigrate "migrateAll", mkAdmin]
 --       [persistLowerCase| ... |]
 -- @
+--
+--   For each entity @User@, generates:
+--
+--   * @data UserAdmin = UserAdmin@
+--   * @getUserAdmin :: a -> UserAdmin@
+--   * Route data instance with @UserListR@, @UserCreateR@, @UserEditR@, @UserDeleteR@
+--   * CRUD handler functions
+--   * @YesodSubDispatch UserAdmin master@ instance
 mkAdmin :: [UnboundEntityDef] -> Q [Dec]
 mkAdmin = mkAdminWith defaultAdminConfigQ
 
 -- | Like 'mkAdmin' but with per-entity customisation.
 mkAdminWith :: AdminConfig -> [UnboundEntityDef] -> Q [Dec]
-mkAdminWith config entities = do
-  let entityNames = map getEntityName entities
-  formDecs        <- concat <$> mapM (generateEntityForm config) entities
-  listDecs        <- concat <$> mapM generateEntityListHelpers entities
-  handlerDecs     <- concat <$> mapM (generateEntityHandlers config) entities
-  dispatchDecs    <- generateDispatchHandlers entityNames
-  dashboardDec    <- generateDashboardHandler entityNames
-  subDispatchDec  <- generateSubDispatchInstance
-  return $ formDecs
-        ++ listDecs
-        ++ handlerDecs
-        ++ dispatchDecs
-        ++ dashboardDec
-        ++ subDispatchDec
+mkAdminWith config entities =
+  concat <$> mapM (mkEntityAdmin config) entities
 
 defaultAdminConfigQ :: AdminConfig
 defaultAdminConfigQ = AdminConfig { acEntityConfigs = Map.empty }
+
+-- ------------------------------------------------------------------
+-- Per-entity admin subsite generation
+-- ------------------------------------------------------------------
+
+mkEntityAdmin :: AdminConfig -> UnboundEntityDef -> Q [Dec]
+mkEntityAdmin config entity = do
+  let entityName   = getEntityName entity          -- "User"
+      adminTypeStr = T.unpack entityName ++ "Admin" -- "UserAdmin"
+      adminConName = mkName adminTypeStr
+      getterName   = mkName $ "get" ++ adminTypeStr -- "getUserAdmin"
+      routes       = mkEntityRoutes entityName
+
+  -- 1. data UserAdmin = UserAdmin
+  let adminDataDec = DataD [] adminConName [] Nothing
+                       [NormalC adminConName []]
+                       []
+
+  -- 2. getUserAdmin :: a -> UserAdmin ; getUserAdmin _ = UserAdmin
+  aVar <- newName "a"
+  let getterSig = SigD getterName
+        (ForallT [PlainTV aVar SpecifiedSpec] []
+          (ArrowT `AppT` VarT aVar `AppT` ConT adminConName))
+      getterDec = FunD getterName
+        [Clause [WildP] (NormalB (ConE adminConName)) []]
+
+  -- 3. Route data family instance + RenderRoute + ParseRoute
+  routeDecs <- generateRouteInstances adminConName entityName
+
+  -- 4. Form + list helpers + handlers
+  formDecs    <- generateEntityForm config entity
+  listDecs    <- generateEntityListHelpers entity
+  handlerDecs <- generateEntityHandlers config entity adminConName
+
+  -- 5. YesodSubDispatch instance
+  dispatchDec <- generateSubDispatchInstance adminConName routes
+
+  return $ [adminDataDec, getterSig, getterDec]
+        ++ routeDecs
+        ++ formDecs
+        ++ listDecs
+        ++ handlerDecs
+        ++ dispatchDec
+
+-- ------------------------------------------------------------------
+-- Route resource tree (for mkYesodSubDispatch only)
+-- ------------------------------------------------------------------
+
+-- | Build the route resource tree for an entity.
+mkEntityRoutes :: Text -> [ResourceTree String]
+mkEntityRoutes entityName =
+  let prefix = T.unpack entityName
+  in [ ResourceLeaf $ Resource
+         { resourceName     = prefix ++ "ListR"
+         , resourcePieces   = []
+         , resourceDispatch = Methods Nothing ["GET"]
+         , resourceAttrs    = []
+         , resourceCheck    = True
+         }
+     , ResourceLeaf $ Resource
+         { resourceName     = prefix ++ "CreateR"
+         , resourcePieces   = [Static "create"]
+         , resourceDispatch = Methods Nothing ["GET", "POST"]
+         , resourceAttrs    = []
+         , resourceCheck    = True
+         }
+     , ResourceLeaf $ Resource
+         { resourceName     = prefix ++ "EditR"
+         , resourcePieces   = [Dynamic "Int64", Static "edit"]
+         , resourceDispatch = Methods Nothing ["GET", "POST"]
+         , resourceAttrs    = []
+         , resourceCheck    = True
+         }
+     , ResourceLeaf $ Resource
+         { resourceName     = prefix ++ "DeleteR"
+         , resourcePieces   = [Dynamic "Int64", Static "delete"]
+         , resourceDispatch = Methods Nothing ["POST"]
+         , resourceAttrs    = []
+         , resourceCheck    = True
+         }
+     ]
+
+-- ------------------------------------------------------------------
+-- Manual route instance generation
+-- ------------------------------------------------------------------
+
+-- | Generate Route data instance, RenderRoute, and ParseRoute for an entity admin subsite.
+--   Uses exact TH Names ('renderRoute, 'parseRoute, etc.) so the generated code
+--   doesn't require yesod-core imports at the splice site.
+generateRouteInstances :: Name -> Text -> Q [Dec]
+generateRouteInstances adminConName entityName = do
+  let listR   = routeName entityName "ListR"
+      createR = routeName entityName "CreateR"
+      editR   = routeName entityName "EditR"
+      deleteR = routeName entityName "DeleteR"
+      routeAppType = AppT (ConT ''Route) (ConT adminConName)
+      int64Bang = (Bang NoSourceUnpackedness NoSourceStrictness, ConT ''Int64)
+
+  -- data instance Route UserAdmin = ... (inside RenderRoute instance)
+  let dataInstDec = DataInstD [] Nothing routeAppType Nothing
+        [ NormalC listR []
+        , NormalC createR []
+        , NormalC editR [int64Bang]
+        , NormalC deleteR [int64Bang]
+        ]
+        [DerivClause Nothing [ConT ''Show, ConT ''Read, ConT ''Eq]]
+
+  -- instance RenderRoute UserAdmin where
+  --   data Route UserAdmin = ...
+  --   renderRoute = ...
+  eidVar <- newName "eid"
+  let renderClauses =
+        [ Clause [ConP listR [] []]
+            (NormalB (TupE [Just (ListE []), Just (ListE [])]))
+            []
+        , Clause [ConP createR [] []]
+            (NormalB (TupE [ Just (ListE [packStr "create"])
+                           , Just (ListE [])]))
+            []
+        , Clause [ConP editR [] [VarP eidVar]]
+            (NormalB (TupE [ Just (ListE [ AppE (VarE 'toPathPiece) (VarE eidVar)
+                                         , packStr "edit"])
+                           , Just (ListE [])]))
+            []
+        , Clause [ConP deleteR [] [VarP eidVar]]
+            (NormalB (TupE [ Just (ListE [ AppE (VarE 'toPathPiece) (VarE eidVar)
+                                         , packStr "delete"])
+                           , Just (ListE [])]))
+            []
+        ]
+      renderInst = InstanceD Nothing []
+        (AppT (ConT ''RenderRoute) (ConT adminConName))
+        [dataInstDec, FunD 'renderRoute renderClauses]
+
+  -- instance ParseRoute UserAdmin
+  eidVar2 <- newName "eid"
+  wildVar <- newName "_x"
+  let parseClauses =
+        [ Clause [TupP [ListP [], WildP]]
+            (NormalB (AppE (ConE 'Just) (ConE listR)))
+            []
+        , Clause [TupP [ListP [LitP (StringL "create")], WildP]]
+            (NormalB (AppE (ConE 'Just) (ConE createR)))
+            []
+        , Clause [TupP [InfixP (VarP eidVar2) '(:) (ListP [LitP (StringL "edit")]), WildP]]
+            (NormalB (AppE (AppE (VarE 'fmap) (ConE editR))
+                          (AppE (VarE 'fromPathPiece) (VarE eidVar2))))
+            []
+        , Clause [TupP [InfixP (VarP eidVar2) '(:) (ListP [LitP (StringL "delete")]), WildP]]
+            (NormalB (AppE (AppE (VarE 'fmap) (ConE deleteR))
+                          (AppE (VarE 'fromPathPiece) (VarE eidVar2))))
+            []
+        , Clause [VarP wildVar]
+            (NormalB (ConE 'Nothing))
+            []
+        ]
+      parseInst = InstanceD Nothing []
+        (AppT (ConT ''ParseRoute) (ConT adminConName))
+        [FunD 'parseRoute parseClauses]
+
+  return [renderInst, parseInst]
+
+-- | Generate a Text literal using Data.Text.pack (properly qualified via TH Name)
+packStr :: String -> Exp
+packStr s = AppE (VarE 'T.pack) (LitE (StringL s))
 
 -- ------------------------------------------------------------------
 -- Helpers
@@ -112,15 +273,18 @@ fieldAccessorName entityName fieldName =
       Nothing      -> t
       Just (c, cs) -> T.cons (toUpper c) cs
 
+-- | Route constructor name for an entity: e.g. "UserListR"
+routeName :: Text -> String -> Name
+routeName entityName suffix = mkName $ T.unpack entityName ++ suffix
+
 -- | Generate a type signature for a subsite handler.
---   @paramTypes@ lists additional leading parameters (e.g. @[Int64]@).
-subHandlerSig :: Name -> [Q Type] -> Q [Dec]
-subHandlerSig fnName paramTypes = do
+subHandlerSig :: Name -> Name -> [Q Type] -> Q [Dec]
+subHandlerSig fnName adminConName paramTypes = do
   masterTv <- newName "master"
   paramTys <- sequence paramTypes
   let masterType   = VarT masterTv
       constraint   = AppT (ConT ''YesodAdmin) masterType
-      subHandler   = AppT (AppT (AppT (ConT ''SubHandlerFor) (ConT ''Admin)) masterType) (ConT ''Html)
+      subHandler   = AppT (AppT (AppT (ConT ''SubHandlerFor) (ConT adminConName)) masterType) (ConT ''Html)
       fullType     = foldr (\p acc -> ArrowT `AppT` p `AppT` acc) subHandler paramTys
   return [SigD fnName (ForallT [PlainTV masterTv SpecifiedSpec] [constraint] fullType)]
 
@@ -183,7 +347,6 @@ generateFieldExpr mvalName entityName field = do
   let reqFn = if nullable then 'aopt else 'areq
   if isForeignKey
     then do
-      -- For FK fields: fmap toSqlKey (areq intField "label" (fmap (fromSqlKey . accessor) mval))
       let extractExpr = AppE (AppE (VarE 'fmap)
                                (InfixE (Just (VarE 'fromSqlKey)) (VarE '(.)) (Just (VarE accessorName))))
                              (VarE mvalName)
@@ -236,25 +399,28 @@ tshow = T.pack . show
 -- Per-entity CRUD handlers
 -- ------------------------------------------------------------------
 
-generateEntityHandlers :: AdminConfig -> UnboundEntityDef -> Q [Dec]
-generateEntityHandlers config entity = do
+generateEntityHandlers :: AdminConfig -> UnboundEntityDef -> Name -> Q [Dec]
+generateEntityHandlers config entity adminConName = do
   let entityName = getEntityName entity
-  listGet    <- generateListGetHandler entityName
-  createGet  <- generateCreateGetHandler config entityName
-  createPost <- generateCreatePostHandler config entityName
-  editGet    <- generateEditGetHandler config entityName
-  editPost   <- generateEditPostHandler config entityName
-  deletePost <- generateDeletePostHandler entityName
+  listGet    <- generateListGetHandler entityName adminConName
+  createGet  <- generateCreateGetHandler config entityName adminConName
+  createPost <- generateCreatePostHandler config entityName adminConName
+  editGet    <- generateEditGetHandler config entityName adminConName
+  editPost   <- generateEditPostHandler config entityName adminConName
+  deletePost <- generateDeletePostHandler entityName adminConName
   return $ listGet ++ createGet ++ createPost
         ++ editGet ++ editPost ++ deletePost
 
-generateListGetHandler :: Text -> Q [Dec]
-generateListGetHandler entityName = do
-  let fnName   = mkName $ "handle" ++ T.unpack entityName ++ "ListGet"
+generateListGetHandler :: Text -> Name -> Q [Dec]
+generateListGetHandler entityName adminConName = do
+  let fnName   = mkName $ "get" ++ T.unpack entityName ++ "ListR"
       fieldsFn = entityFnName "adminListFields" entityName
       valuesFn = entityFnName "adminListValues" entityName
+      createR  = routeName entityName "CreateR"
+      editR    = routeName entityName "EditR"
+      deleteR  = routeName entityName "DeleteR"
 
-  sig <- subHandlerSig fnName []
+  sig <- subHandlerSig fnName adminConName []
   body <- [|
     do toParent <- getRouteToParent
        entities <- liftHandler $ runDB $ selectList [] []
@@ -264,18 +430,19 @@ generateListGetHandler entityName = do
        liftHandler $ defaultLayout $
          adminListWidget $(litE (stringL (T.unpack entityName)))
                          columns rows
-                         (toParent . $(conE 'AdminEntityCreateR))
-                         (\nm i -> toParent ($(conE 'AdminEntityEditR) nm i))
-                         (\nm i -> toParent ($(conE 'AdminEntityDeleteR) nm i))
-                         (toParent $(conE 'AdminDashboardR))
+                         (toParent $(conE createR))
+                         (\i -> toParent ($(conE editR) i))
+                         (\i -> toParent ($(conE deleteR) i))
     |]
   return $ sig ++ [FunD fnName [Clause [] (NormalB body) []]]
 
-generateCreateGetHandler :: AdminConfig -> Text -> Q [Dec]
-generateCreateGetHandler config entityName = do
-  let fnName = mkName $ "handle" ++ T.unpack entityName ++ "CreateGet"
-      formFn = getFormFnName config entityName
-  sig <- subHandlerSig fnName []
+generateCreateGetHandler :: AdminConfig -> Text -> Name -> Q [Dec]
+generateCreateGetHandler config entityName adminConName = do
+  let fnName  = mkName $ "get" ++ T.unpack entityName ++ "CreateR"
+      formFn  = getFormFnName config entityName
+      createR = routeName entityName "CreateR"
+      listR   = routeName entityName "ListR"
+  sig <- subHandlerSig fnName adminConName []
   body <- [|
     do toParent <- getRouteToParent
        (formBody, enctype) <- liftHandler $
@@ -283,18 +450,20 @@ generateCreateGetHandler config entityName = do
        liftHandler $ defaultLayout $
          adminFormWidget $(litE (stringL (T.unpack entityName)))
                          "Create"
-                         (toParent ($(conE 'AdminEntityCreateR) $(litE (stringL (T.unpack entityName)))))
+                         (toParent $(conE createR))
                          formBody
                          enctype
-                         (toParent . $(conE 'AdminEntityListR))
+                         (toParent $(conE listR))
     |]
   return $ sig ++ [FunD fnName [Clause [] (NormalB body) []]]
 
-generateCreatePostHandler :: AdminConfig -> Text -> Q [Dec]
-generateCreatePostHandler config entityName = do
-  let fnName = mkName $ "handle" ++ T.unpack entityName ++ "CreatePost"
-      formFn = getFormFnName config entityName
-  sig <- subHandlerSig fnName []
+generateCreatePostHandler :: AdminConfig -> Text -> Name -> Q [Dec]
+generateCreatePostHandler config entityName adminConName = do
+  let fnName  = mkName $ "post" ++ T.unpack entityName ++ "CreateR"
+      formFn  = getFormFnName config entityName
+      createR = routeName entityName "CreateR"
+      listR   = routeName entityName "ListR"
+  sig <- subHandlerSig fnName adminConName []
   body <- [|
     do toParent <- getRouteToParent
        ((result, formBody), enctype) <- liftHandler $
@@ -302,33 +471,34 @@ generateCreatePostHandler config entityName = do
        case result of
          FormSuccess record -> do
            _ <- liftHandler $ runDB $ insert record
-           liftHandler $ redirect $ toParent
-             ($(conE 'AdminEntityListR) $(litE (stringL (T.unpack entityName))))
+           liftHandler $ redirect $ toParent $(conE listR)
          FormMissing ->
            liftHandler $ defaultLayout $
              adminFormWidget $(litE (stringL (T.unpack entityName)))
                              "Create"
-                             (toParent ($(conE 'AdminEntityCreateR) $(litE (stringL (T.unpack entityName)))))
+                             (toParent $(conE createR))
                              formBody
                              enctype
-                             (toParent . $(conE 'AdminEntityListR))
+                             (toParent $(conE listR))
          FormFailure _ ->
            liftHandler $ defaultLayout $
              adminFormWidget $(litE (stringL (T.unpack entityName)))
                              "Create"
-                             (toParent ($(conE 'AdminEntityCreateR) $(litE (stringL (T.unpack entityName)))))
+                             (toParent $(conE createR))
                              formBody
                              enctype
-                             (toParent . $(conE 'AdminEntityListR))
+                             (toParent $(conE listR))
     |]
   return $ sig ++ [FunD fnName [Clause [] (NormalB body) []]]
 
-generateEditGetHandler :: AdminConfig -> Text -> Q [Dec]
-generateEditGetHandler config entityName = do
-  let fnName = mkName $ "handle" ++ T.unpack entityName ++ "EditGet"
+generateEditGetHandler :: AdminConfig -> Text -> Name -> Q [Dec]
+generateEditGetHandler config entityName adminConName = do
+  let fnName = mkName $ "get" ++ T.unpack entityName ++ "EditR"
       formFn = getFormFnName config entityName
+      editR  = routeName entityName "EditR"
+      listR  = routeName entityName "ListR"
   entityIdName <- newName "entityId"
-  sig <- subHandlerSig fnName [conT ''Int64]
+  sig <- subHandlerSig fnName adminConName [conT ''Int64]
   body <- [|
     do toParent <- getRouteToParent
        record <- liftHandler $ runDB $ get404 (toSqlKey $(varE entityIdName))
@@ -337,21 +507,21 @@ generateEditGetHandler config entityName = do
        liftHandler $ defaultLayout $
          adminFormWidget $(litE (stringL (T.unpack entityName)))
                          "Edit"
-                         (toParent ($(conE 'AdminEntityEditR)
-                           $(litE (stringL (T.unpack entityName)))
-                           $(varE entityIdName)))
+                         (toParent ($(conE editR) $(varE entityIdName)))
                          formBody
                          enctype
-                         (toParent . $(conE 'AdminEntityListR))
+                         (toParent $(conE listR))
     |]
   return $ sig ++ [FunD fnName [Clause [VarP entityIdName] (NormalB body) []]]
 
-generateEditPostHandler :: AdminConfig -> Text -> Q [Dec]
-generateEditPostHandler config entityName = do
-  let fnName = mkName $ "handle" ++ T.unpack entityName ++ "EditPost"
+generateEditPostHandler :: AdminConfig -> Text -> Name -> Q [Dec]
+generateEditPostHandler config entityName adminConName = do
+  let fnName = mkName $ "post" ++ T.unpack entityName ++ "EditR"
       formFn = getFormFnName config entityName
+      editR  = routeName entityName "EditR"
+      listR  = routeName entityName "ListR"
   entityIdName <- newName "entityId"
-  sig <- subHandlerSig fnName [conT ''Int64]
+  sig <- subHandlerSig fnName adminConName [conT ''Int64]
   body <- [|
     do toParent <- getRouteToParent
        ((result, formBody), enctype) <- liftHandler $
@@ -359,42 +529,37 @@ generateEditPostHandler config entityName = do
        case result of
          FormSuccess record -> do
            liftHandler $ runDB $ replace (toSqlKey $(varE entityIdName)) record
-           liftHandler $ redirect $ toParent
-             ($(conE 'AdminEntityListR) $(litE (stringL (T.unpack entityName))))
+           liftHandler $ redirect $ toParent $(conE listR)
          FormMissing ->
            liftHandler $ defaultLayout $
              adminFormWidget $(litE (stringL (T.unpack entityName)))
                              "Edit"
-                             (toParent ($(conE 'AdminEntityEditR)
-                               $(litE (stringL (T.unpack entityName)))
-                               $(varE entityIdName)))
+                             (toParent ($(conE editR) $(varE entityIdName)))
                              formBody
                              enctype
-                             (toParent . $(conE 'AdminEntityListR))
+                             (toParent $(conE listR))
          FormFailure _ ->
            liftHandler $ defaultLayout $
              adminFormWidget $(litE (stringL (T.unpack entityName)))
                              "Edit"
-                             (toParent ($(conE 'AdminEntityEditR)
-                               $(litE (stringL (T.unpack entityName)))
-                               $(varE entityIdName)))
+                             (toParent ($(conE editR) $(varE entityIdName)))
                              formBody
                              enctype
-                             (toParent . $(conE 'AdminEntityListR))
+                             (toParent $(conE listR))
     |]
   return $ sig ++ [FunD fnName [Clause [VarP entityIdName] (NormalB body) []]]
 
-generateDeletePostHandler :: Text -> Q [Dec]
-generateDeletePostHandler entityName = do
-  let fnName = mkName $ "handle" ++ T.unpack entityName ++ "DeletePost"
+generateDeletePostHandler :: Text -> Name -> Q [Dec]
+generateDeletePostHandler entityName adminConName = do
+  let fnName = mkName $ "post" ++ T.unpack entityName ++ "DeleteR"
       conTy  = mkName (T.unpack entityName)
+      listR  = routeName entityName "ListR"
   entityIdName <- newName "entityId"
-  sig <- subHandlerSig fnName [conT ''Int64]
+  sig <- subHandlerSig fnName adminConName [conT ''Int64]
   body <- [|
     do toParent <- getRouteToParent
        liftHandler $ runDB $ delete (toSqlKey $(varE entityIdName) :: Key $(conT conTy))
-       liftHandler $ redirect $ toParent
-         ($(conE 'AdminEntityListR) $(litE (stringL (T.unpack entityName))))
+       liftHandler $ redirect $ toParent $(conE listR)
     |]
   return $ sig ++ [FunD fnName [Clause [VarP entityIdName] (NormalB body) []]]
 
@@ -405,89 +570,15 @@ getFormFnName config entityName =
     Nothing           -> entityFnName "adminForm" entityName
 
 -- ------------------------------------------------------------------
--- Dispatch handlers (Text pattern matching)
--- ------------------------------------------------------------------
-
-generateDispatchHandlers :: [Text] -> Q [Dec]
-generateDispatchHandlers entityNames = do
-  listDec       <- generateTextDispatch "getAdminEntityListR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "ListGet")
-  createGetDec  <- generateTextDispatch "getAdminEntityCreateR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "CreateGet")
-  createPostDec <- generateTextDispatch "postAdminEntityCreateR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "CreatePost")
-  editGetDec    <- generateTextDispatchWithId "getAdminEntityEditR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "EditGet")
-  editPostDec   <- generateTextDispatchWithId "postAdminEntityEditR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "EditPost")
-  deletePostDec <- generateTextDispatchWithId "postAdminEntityDeleteR"
-                     entityNames
-                     (\en -> mkName $ "handle" ++ T.unpack en ++ "DeletePost")
-  return $ listDec ++ createGetDec ++ createPostDec
-        ++ editGetDec ++ editPostDec ++ deletePostDec
-
-generateTextDispatch :: String -> [Text] -> (Text -> Name) -> Q [Dec]
-generateTextDispatch fnNameStr entityNames handlerFn = do
-  let fnName  = mkName fnNameStr
-      clauses = [ Clause [LitP (StringL (T.unpack en))]
-                         (NormalB (VarE (handlerFn en)))
-                         []
-                | en <- entityNames
-                ]
-  fallbackBody <- [| liftHandler notFound |]
-  nm <- newName "_entityName"
-  let fallbackClause = Clause [VarP nm] (NormalB fallbackBody) []
-  sig <- subHandlerSig fnName [conT ''Text]
-  return $ sig ++ [FunD fnName (clauses ++ [fallbackClause])]
-
-generateTextDispatchWithId :: String -> [Text] -> (Text -> Name) -> Q [Dec]
-generateTextDispatchWithId fnNameStr entityNames handlerFn = do
-  entityIdVar <- newName "entityId"
-  let fnName  = mkName fnNameStr
-      clauses = [ Clause [LitP (StringL (T.unpack en)), VarP entityIdVar]
-                         (NormalB (AppE (VarE (handlerFn en)) (VarE entityIdVar)))
-                         []
-                | en <- entityNames
-                ]
-  fallbackBody <- [| liftHandler notFound |]
-  nm1 <- newName "_entityName"
-  nm2 <- newName "_entityId"
-  let fallbackClause = Clause [VarP nm1, VarP nm2] (NormalB fallbackBody) []
-  sig <- subHandlerSig fnName [conT ''Text, conT ''Int64]
-  return $ sig ++ [FunD fnName (clauses ++ [fallbackClause])]
-
--- ------------------------------------------------------------------
--- Dashboard handler
--- ------------------------------------------------------------------
-
-generateDashboardHandler :: [Text] -> Q [Dec]
-generateDashboardHandler entityNames = do
-  let fnName = mkName "getAdminDashboardR"
-  sig <- subHandlerSig fnName []
-  body <- [|
-    do toParent <- getRouteToParent
-       liftHandler $ defaultLayout $
-         adminDashboardWidget
-           $(listE [litE (stringL (T.unpack en)) | en <- entityNames])
-           (toParent . $(conE 'AdminEntityListR))
-    |]
-  return $ sig ++ [FunD fnName [Clause [] (NormalB body) []]]
-
--- ------------------------------------------------------------------
 -- YesodSubDispatch instance
 -- ------------------------------------------------------------------
 
-generateSubDispatchInstance :: Q [Dec]
-generateSubDispatchInstance = do
+generateSubDispatchInstance :: Name -> [ResourceTree String] -> Q [Dec]
+generateSubDispatchInstance adminConName routes = do
   masterTv <- newName "master"
   let masterType = VarT masterTv
       constraint = AppT (ConT ''YesodAdmin) masterType
-      instanceType = AppT (AppT (ConT ''YesodSubDispatch) (ConT ''Admin)) masterType
-  dispatchBody <- [| $(mkYesodSubDispatch resourcesAdmin) |]
+      instanceType = AppT (AppT (ConT ''YesodSubDispatch) (ConT adminConName)) masterType
+  dispatchBody <- mkYesodSubDispatch routes
   let method = FunD 'yesodSubDispatch [Clause [] (NormalB dispatchBody) []]
   return [InstanceD Nothing [constraint] instanceType [method]]
