@@ -291,19 +291,207 @@ The technical barrier is not insurmountable -- the pieces exist. The social
 barrier is that the Haskell web ecosystem is small, and the few developers who
 work in it tend to value explicit control over auto-generation.
 
-** What Would a "Haskell Admin" Look Like?
+** Feasibility: TH-Generated Admin from Persistent EntityDef
 
-A hypothetical solution could:
+Rather than runtime introspection (Django) or external code generation (IHP), a
+third approach exists: *compile-time generation via Template Haskell*, using the
+same entity definitions that ~mkPersist~ already consumes. This would give Yesod
+the same "one line to CRUD" developer experience as Django, but with compile-time
+type safety.
 
-- Use ~generics-sop~ to walk record fields and produce form HTML
-- Use Persistent's ~EntityDef~ metadata for DB field types and constraints
-- Generate type-safe CRUD handlers via a typeclass (e.g. ~AdminModel a~)
-- Provide list views with sorting/filtering/pagination from field metadata
-- Run on top of Servant or Yesod as a subsite
+*** The ~share~ Combinator Makes This Idiomatic
 
-This is approximately what ~yesod-admin~ tried to build before being abandoned.
-The challenge is handling the full matrix of field types, relationships, custom
-widgets, permissions, and edge cases that Django's admin has refined over 20 years.
+Persistent's ~share~ applies multiple TH generators to the same
+~[UnboundEntityDef]~. A custom ~mkAdmin~ plugs in alongside ~mkPersist~:
+
+#+begin_src haskell
+share
+    [ mkPersist sqlSettings
+    , mkMigrate "migrateAll"
+    , mkAdmin                  -- generates routes, handlers, forms
+    ]
+    [persistLowerCase|
+        User
+            name Text
+            email Text
+            age Int Maybe
+        Post
+            title Text
+            authorId UserId
+    |]
+#+end_src
+
+This is the Django equivalent of ~admin.site.register(User, Post)~ -- except it
+runs at compile time and produces type-checked Haskell code.
+
+*** Available Metadata
+
+The ~UnboundEntityDef~ received by the TH splice contains everything needed:
+
+*EntityDef level*:
+- ~entityHaskell~ -- Haskell type name (e.g. "User")
+- ~entityDB~ -- database table name (e.g. "user")
+- ~entityId~ -- primary key definition (surrogate or composite)
+- ~entityUniques~ -- uniqueness constraints
+- ~entityForeigns~ -- foreign key relationships
+
+*FieldDef level* (per field):
+- ~fieldHaskell~ -- field name (e.g. "email")
+- ~fieldType~ -- parsed type (~FTTypeCon Nothing "Text"~, ~FTTypeCon Nothing "Int"~, etc.)
+- ~fieldAttrs~ -- attributes including ~FieldAttrMaybe~, ~FieldAttrDefault~, ~FieldAttrMaxlen~
+- ~fieldReference~ -- ~ForeignRef entityName~ for FK fields
+
+All of these types have ~Lift~ instances, so they are fully available at compile
+time.
+
+*** Field Type to Form Widget Mapping
+
+The TH splice pattern-matches on ~FieldType~ to choose the appropriate Yesod
+form field:
+
+#+begin_src haskell
+fieldTypeToFormField :: FieldType -> Q Exp
+fieldTypeToFormField = \case
+    FTTypeCon Nothing "Text"      -> [| textField |]
+    FTTypeCon Nothing "Int"       -> [| intField |]
+    FTTypeCon Nothing "Int64"     -> [| intField |]
+    FTTypeCon Nothing "Double"    -> [| doubleField |]
+    FTTypeCon Nothing "Bool"      -> [| checkBoxField |]
+    FTTypeCon Nothing "Day"       -> [| dayField |]
+    FTTypeCon Nothing "TimeOfDay" -> [| timeField |]
+    FTTypeCon Nothing "UTCTime"   -> [| datetimeLocalField |]
+    FTTypeCon Nothing "Textarea"  -> [| textareaField |]
+    FTTypeCon Nothing name
+        | "Id" `T.isSuffixOf` name -> [| selectField optionsFromEntity |]
+    _                              -> [| textField |]  -- fallback
+#+end_src
+
+Nullable fields (detected via ~FieldAttrMaybe~ in ~fieldAttrs~) use ~aopt~
+(optional) instead of ~areq~ (required).
+
+*** What the Generated Code Would Look Like
+
+For each entity, ~mkAdmin~ would generate:
+
+*1. Route types* (or a subsite):
+
+#+begin_src haskell
+-- Generated for "User" entity
+data AdminUserR
+    = AdminUserListR           -- GET: list all users
+    | AdminUserCreateR         -- GET: new form, POST: create
+    | AdminUserEditR UserId    -- GET: edit form, POST: update
+    | AdminUserDeleteR UserId  -- POST: delete
+#+end_src
+
+*2. List handler* with pagination:
+
+#+begin_src haskell
+getAdminUserListR :: Handler Html
+getAdminUserListR = do
+    users <- runDB $ selectList [] [Asc UserName]
+    defaultLayout $(adminListWidget ''User)
+#+end_src
+
+*3. Form* (generated from field metadata):
+
+#+begin_src haskell
+adminUserForm :: Maybe User -> AForm Handler User
+adminUserForm mUser = User
+    <$> areq textField "Name"  (userName  <$> mUser)
+    <*> areq textField "Email" (userEmail <$> mUser)
+    <*> aopt intField  "Age"   (userAge   <$> mUser)  -- Maybe -> aopt
+#+end_src
+
+*4. Create/Edit/Delete handlers*:
+
+#+begin_src haskell
+postAdminUserCreateR :: Handler Html
+postAdminUserCreateR = do
+    ((result, widget), enctype) <- runFormPost $
+        renderBootstrap3 BootstrapBasicForm (adminUserForm Nothing)
+    case result of
+        FormSuccess user -> do
+            _ <- runDB $ insert user
+            redirect AdminUserListR
+        _ -> defaultLayout $(adminFormWidget widget enctype)
+#+end_src
+
+*** The Subtlety: ~UnboundEntityDef~ vs Resolved ~EntityDef~
+
+The ~UnboundEntityDef~ received via ~share~ has slightly incomplete resolution --
+~fieldSqlType~ and some ~fieldReference~ values are filled in later by
+~mkPersist~'s internal processing. Two strategies:
+
+- *Strategy A* (simpler): Pattern-match on ~FieldType~ text names (e.g.
+  ~FTTypeCon Nothing "Text"~). This is fully available in ~UnboundEntityDef~ and
+  sufficient for widget mapping. FK fields are detectable by the "Id" suffix
+  convention.
+
+- *Strategy B* (more robust): Use ~mkEntityDefList~ to get fully resolved
+  ~[EntityDef]~ in a separate TH splice group, then feed those into the admin
+  generator:
+
+#+begin_src haskell
+share [mkPersist sqlSettings, mkEntityDefList "entityDefs"] [persistLowerCase| ... |]
+
+$(pure [])  -- splice group barrier
+
+mkAdmin entityDefs  -- receives fully resolved EntityDefs
+#+end_src
+
+Strategy A is simpler and keeps everything in one splice. Strategy B gives
+access to ~fieldSqlType~ and fully resolved ~fieldReference~ as a fallback.
+
+*** Comparison with Django's Approach
+
+| Aspect               | Django (runtime)               | Proposed TH approach             |
+|----------------------+--------------------------------+----------------------------------|
+| When it runs         | Every request (introspection)  | Once at compile time             |
+| Type safety          | Runtime errors                 | Compile-time errors              |
+| Model change impact  | Automatic (next request)       | Automatic (next compile)         |
+| Broken field refs    | Runtime ~AttributeError~       | Compile error                    |
+| Widget mapping       | ~_meta~ field class dispatch   | ~FieldType~ pattern matching     |
+| FK dropdowns         | ~ModelChoiceField~ (all rows)  | ~selectField~ (configurable)     |
+| Customization        | ~ModelAdmin~ class overrides   | Typeclass instances (TBD)        |
+| Code visibility      | Hidden behind framework        | Generated Haskell, inspectable   |
+| Developer experience | ~admin.site.register(Model)~   | ~mkAdmin~ in ~share~ block       |
+
+*** Open Design Questions
+
+1. *Routing*: Generate a Yesod subsite? Or standalone routes with a prefix? A
+   subsite is more composable but adds complexity.
+
+2. *Customization*: Django uses ~ModelAdmin~ class attributes. The Haskell
+   equivalent could be a typeclass:
+
+#+begin_src haskell
+class AdminEntity a where
+    adminListFields   :: Proxy a -> [Text]      -- which fields to show in list
+    adminSearchFields :: Proxy a -> [Text]      -- which fields are searchable
+    adminReadonly     :: Proxy a -> [Text]      -- read-only fields
+    -- defaults via DefaultSignatures from EntityDef metadata
+#+end_src
+
+3. *Templates*: Generate Hamlet widgets? Or return raw HTML via blaze? Hamlet
+   integrates better with Yesod but adds a TH-within-TH complexity.
+
+4. *Permissions*: Hook into Yesod's ~isAuthorized~ or generate its own auth
+   checks?
+
+5. *Foreign key widgets*: Eager-load all related entities (Django's default,
+   dangerous for large tables) or use AJAX autocomplete?
+
+*** Verdict
+
+This is *feasible and novel*. No existing Haskell library takes this approach.
+The metadata is available, the TH machinery is proven (Persistent already uses
+it extensively), and the ~share~ combinator provides the idiomatic integration
+point. The result would be Django-like DX with compile-time safety -- the best
+of both worlds.
+
+The main engineering challenge is not "can it be done" but "how much of Django's
+20 years of refinement can be replicated in a reasonable scope."
 
 * Comparative Summary
 
@@ -330,27 +518,29 @@ widgets, permissions, and edge cases that Django's admin has refined over 20 yea
 1. *Django's admin is the benchmark* -- any Haskell solution should be measured
    against the "one line to CRUD" developer experience.
 
-2. *IHP's approach is the most viable starting point* in the Haskell world --
-   schema-driven code generation with compile-time safety. The trade-off
-   (explicit scaffolding vs. automatic introspection) may be acceptable given
-   the type-safety benefits.
+2. *A TH-based approach using Persistent's ~EntityDef~ is the recommended path*.
+   The ~share~ combinator provides the idiomatic integration point. A custom
+   ~mkAdmin~ splice can generate routes, handlers, and forms from the same
+   entity definitions that ~mkPersist~ uses -- giving Django-like DX with
+   compile-time type safety. This approach is novel: no existing library does it.
 
-3. *The missing piece is a ~generics-sop~-based admin library* -- something
-   that walks Haskell record types and auto-generates:
-   - List views with sortable/filterable columns
-   - Create/edit forms with appropriate widgets per field type
-   - Delete confirmation
-   - Pagination
-   - Basic permission checks
+3. *Start with Strategy A* (pattern-matching on ~FieldType~ text names in
+   ~UnboundEntityDef~). This is simpler than waiting for fully resolved
+   ~EntityDef~ and covers the common cases (Text, Int, Bool, Day, FK via "Id"
+   suffix).
 
-4. *Persistent's ~EntityDef~* already contains the metadata needed (field
-   names, types, constraints). A library that reads this metadata and produces
-   admin pages would fill the Yesod ecosystem gap that has been empty since 2016.
+4. *Customization via a typeclass with ~DefaultSignatures~* is the Haskell
+   analogue to Django's ~ModelAdmin~. Users get sensible defaults from entity
+   metadata but can override per-entity.
 
 5. *Don't replicate Django's weaknesses* -- a Haskell admin should:
    - Handle ForeignKey fields efficiently from the start (no "load all rows" default)
    - Support process-centric workflows, not just table-centric CRUD
    - Provide compile-time guarantees that Django's runtime approach cannot
+
+6. *IHP's approach* (schema-driven external code generation) remains a viable
+   alternative if TH complexity becomes prohibitive, but it sacrifices the
+   "one splice to CRUD" developer experience.
 
 * Sources
 
@@ -366,5 +556,9 @@ widgets, permissions, and edge cases that Django's admin has refined over 20 yea
 - [[https://hackage.haskell.org/package/digestive-functors][digestive-functors on Hackage]]
 - [[https://hackage.haskell.org/package/hyperbole][Hyperbole on Hackage]]
 - [[https://hackage.haskell.org/package/regular-web][regular-web on Hackage]]
+- [[https://hackage.haskell.org/package/persistent/docs/Database-Persist-EntityDef-Internal.html][Database.Persist.EntityDef.Internal (Hackage)]]
+- [[https://hackage.haskell.org/package/persistent/docs/Database-Persist-FieldDef.html][Database.Persist.FieldDef (Hackage)]]
+- [[https://hackage.haskell.org/package/persistent/docs/Database-Persist-TH.html][Database.Persist.TH (Hackage)]]
+- [[https://hackage.haskell.org/package/yesod-form/docs/Yesod-Form-Fields.html][Yesod.Form.Fields (Hackage)]]
 - [[https://discourse.haskell.org/t/enhancing-yesod-capabilities/11704][Enhancing Yesod Capabilities -- Haskell Discourse]]
 - [[https://www.haskellforall.com/2022/05/generate-web-forms-from-pure-functions.html][Grace Browser -- Generate Web Forms from Pure Functions]]
