@@ -3,7 +3,7 @@
 }:
 let
   buildTargets = {
-    library = hpkgs.template-project;
+    library = hpkgs.yesod-admin;
   };
 in
 buildTargets // {
