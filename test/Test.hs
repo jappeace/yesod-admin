@@ -1,40 +1,30 @@
-module Main where
+module Main (main) where
 
-import Test.Tasty
-import Test.Tasty.QuickCheck as QC
-import Test.Tasty.HUnit
-
-import Data.List(sort)
-import qualified Template
+import Database.Persist.Sql qualified as Sql
+import Test.Tasty (TestTree, defaultMain, testGroup)
+import Test.Tasty.HUnit (testCase, (@?=))
+import TestAdmin (makeTestApp)
+import TestModel (User(..), Post(..), UserId)
 
 main :: IO ()
 main = defaultMain tests
 
 tests :: TestTree
-tests = testGroup "Tests" [qcProps, unitTests]
-
-qcProps :: TestTree
-qcProps = testGroup "(checked by QuickCheck)"
-  [ QC.testProperty "sort == sort . reverse" $
-      \list -> sort (list :: [Int]) == sort (reverse list)
-  , QC.testProperty "Fermat's little theorem" $
-      \x -> ((x :: Integer)^zeven  - x) `mod` zeven == 0
-  ]
-  where
-    zeven :: Integer
-    zeven = 7
-
-oneTwoThree :: [Int]
-oneTwoThree = [1, 2, 3]
-
-unitTests :: TestTree
-unitTests = testGroup "Unit tests"
-  [ testCase "List comparison (different length)" $
-       oneTwoThree `compare` [1,2] @?= GT
-
-  -- the following test does not hold
-  , testCase "List comparison (same length)" $
-      oneTwoThree `compare` [1,2,3] @?= EQ
-  , testCase "run main" $ do
-      Template.main
+tests = testGroup "Admin"
+  [ testGroup "Model compilation"
+      [ testCase "User constructor is available" $ do
+          let user = User "alice" "alice@example.com" (Just 30)
+          userName user @?= "alice"
+      , testCase "Post constructor is available" $ do
+          let authorKey = Sql.toSqlKey 1 :: UserId
+              title = postTitle (Post "Hello" "World" authorKey)
+          title @?= "Hello"
+      ]
+  , testGroup "Admin subsite compilation"
+      [ testCase "makeTestApp initialises without error" $ do
+          _app <- makeTestApp
+          -- If we get here, the TH splice compiled, the routes work,
+          -- and the database migrated successfully.
+          return ()
+      ]
   ]
